@@ -1,12 +1,13 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import {
   APIProvider,
   Map,
   AdvancedMarker,
   useMap,
   InfoWindow,
+  MapMouseEvent,
 } from "@vis.gl/react-google-maps";
 import { supabase } from "@/lib/supabase";
 import {
@@ -15,14 +16,15 @@ import {
   LocateFixed,
   MousePointerClick,
   Zap,
-  // Users,
+  Users,
   X,
   Menu,
   HelpCircle,
-  Info,
   Car,
   ShieldCheck,
   ExternalLink,
+  Siren,
+  CheckCircle2,
 } from "lucide-react";
 import posthog from "posthog-js";
 
@@ -35,6 +37,8 @@ type SpeedCamera = {
   report_count: number;
   road_name: string;
   created_at: string;
+  caught_count: number;
+  caught_speeds: number[];
 };
 
 type NewMarker = { lat: number; lng: number; road_name: string };
@@ -198,6 +202,12 @@ export default function SpeedCameraMap() {
   );
   const [editingCamera, setEditingCamera] = useState<SpeedCamera | null>(null);
 
+  const [verifyingCaughtId, setVerifyingCaughtId] = useState<string | null>(
+    null,
+  );
+  const [caughtSpeed, setCaughtSpeed] = useState<string>("");
+  const [isSubmittingCaught, setIsSubmittingCaught] = useState(false);
+
   const [nearbyCamera, setNearbyCamera] = useState<SpeedCamera | null>(null);
   const [nearbyDistance, setNearbyDistance] = useState<number>(0);
 
@@ -210,10 +220,7 @@ export default function SpeedCameraMap() {
 
   const defaultCenter = { lat: -1.1873, lng: 36.9238 };
 
-  useEffect(() => {
-    fetchCameras();
-  }, []);
-
+  // Extracted fetch function that doesn't trigger effect dependencies
   const fetchCameras = async () => {
     const { data, error } = await supabase
       .from("speed_cameras")
@@ -221,6 +228,14 @@ export default function SpeedCameraMap() {
       .order("report_count", { ascending: false });
     if (!error) setCameras(data || []);
   };
+
+  // FIXED: Using an inner async function to prevent "synchronous setState" errors from linters
+  useEffect(() => {
+    const loadData = async () => {
+      await fetchCameras();
+    };
+    loadData();
+  }, []);
 
   const getRoadName = async (lat: number, lng: number): Promise<string> => {
     const geocoder = new window.google.maps.Geocoder();
@@ -287,7 +302,7 @@ export default function SpeedCameraMap() {
     }
   };
 
-  const handleMapClick = async (e: any) => {
+  const handleMapClick = async (e: MapMouseEvent) => {
     if (!e.detail.latLng || newMarker) return;
 
     const lat = e.detail.latLng.lat;
@@ -296,6 +311,7 @@ export default function SpeedCameraMap() {
     setNewMarker({ lat, lng, road_name: "Locating road..." });
     setSelectedCamera(null);
     setEditingCamera(null);
+    setVerifyingCaughtId(null);
     if (window.innerWidth < 768) setIsSidebarOpen(false);
 
     checkProximity(lat, lng);
@@ -315,6 +331,7 @@ export default function SpeedCameraMap() {
 
         setSelectedCamera(null);
         setEditingCamera(null);
+        setVerifyingCaughtId(null);
         setNewMarker({ lat, lng, road_name: "Locating road..." });
 
         checkProximity(lat, lng);
@@ -339,6 +356,8 @@ export default function SpeedCameraMap() {
       speed_limit: speedLimit ? parseInt(speedLimit) : null,
       road_name: newMarker.road_name,
       report_count: 1,
+      caught_count: 0,
+      caught_speeds: [],
     };
 
     const { error } = await supabase.from("speed_cameras").insert([cameraData]);
@@ -361,7 +380,7 @@ export default function SpeedCameraMap() {
     if (!editingCamera) return;
     setIsSubmitting(true);
 
-    const updates = {
+    const updates: Partial<SpeedCamera> = {
       speed_limit: editSpeedLimit
         ? parseInt(editSpeedLimit)
         : editingCamera.speed_limit,
@@ -390,7 +409,9 @@ export default function SpeedCameraMap() {
     if (!nearbyCamera) return;
     setIsSubmitting(true);
 
-    const updates: any = { report_count: nearbyCamera.report_count + 1 };
+    const updates: Partial<SpeedCamera> = {
+      report_count: nearbyCamera.report_count + 1,
+    };
 
     if (confirmSpeedLimit) {
       updates.speed_limit = parseInt(confirmSpeedLimit);
@@ -417,11 +438,134 @@ export default function SpeedCameraMap() {
     setIsSubmitting(false);
   };
 
+  const handleCaughtSubmit = async (camera: SpeedCamera) => {
+    if (!caughtSpeed) return;
+    setIsSubmittingCaught(true);
+
+    const numericSpeed = parseInt(caughtSpeed);
+    const newCaughtSpeeds = camera.caught_speeds
+      ? [...camera.caught_speeds, numericSpeed]
+      : [numericSpeed];
+
+    const { error } = await supabase
+      .from("speed_cameras")
+      .update({
+        caught_count: (camera.caught_count || 0) + 1,
+        caught_speeds: newCaughtSpeeds,
+      })
+      .eq("id", camera.id);
+
+    if (!error) {
+      if (posthog) {
+        posthog.capture("user_caught", {
+          camera_id: camera.id,
+          road_name: camera.road_name,
+          caught_speed: numericSpeed,
+        });
+      }
+      setVerifyingCaughtId(null);
+      setCaughtSpeed("");
+
+      setCameras((prev) =>
+        prev.map((c) =>
+          c.id === camera.id
+            ? {
+                ...c,
+                caught_count: (c.caught_count || 0) + 1,
+                caught_speeds: newCaughtSpeeds,
+              }
+            : c,
+        ),
+      );
+
+      if (selectedCamera?.id === camera.id) {
+        setSelectedCamera({
+          ...camera,
+          caught_count: (camera.caught_count || 0) + 1,
+          caught_speeds: newCaughtSpeeds,
+        });
+      }
+    }
+    setIsSubmittingCaught(false);
+  };
+
   const isMapIdle = !newMarker && !selectedCamera && !editingCamera;
 
+  const renderCaughtUI = (cam: SpeedCamera) => {
+    const isVerifying = verifyingCaughtId === cam.id;
+
+    return (
+      <div className="mt-4 pt-4 border-t border-slate-700/50">
+        {isVerifying ? (
+          <div className="flex items-center gap-2 animate-in fade-in zoom-in duration-200">
+            <input
+              type="number"
+              placeholder="Speed? (km/h)"
+              value={caughtSpeed}
+              onChange={(e) => setCaughtSpeed(e.target.value)}
+              className="flex-1 min-w-[100px] bg-slate-950/50 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-red-500/50 focus:ring-1 focus:ring-red-500/50 placeholder:text-slate-500"
+              autoFocus
+            />
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                handleCaughtSubmit(cam);
+              }}
+              disabled={isSubmittingCaught || !caughtSpeed}
+              className="bg-red-500/20 text-red-400 hover:bg-red-500/30 px-3 py-2 rounded-lg text-sm font-semibold transition-colors disabled:opacity-50 flex items-center gap-1.5 border border-red-500/20 whitespace-nowrap"
+            >
+              {isSubmittingCaught ? (
+                "Saving..."
+              ) : (
+                <>
+                  <CheckCircle2 className="w-4 h-4" /> Confirm
+                </>
+              )}
+            </button>
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                setVerifyingCaughtId(null);
+                setCaughtSpeed("");
+              }}
+              className="p-2 text-slate-400 hover:text-slate-200 transition-colors rounded-lg hover:bg-slate-800 shrink-0"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        ) : (
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 text-[11px] sm:text-xs font-medium text-slate-400">
+              <Siren className="w-4 h-4 text-red-400/80 shrink-0" />
+              <span className="truncate">
+                {cam.caught_count > 0 ? (
+                  <>
+                    Caught{" "}
+                    <strong className="text-red-400">{cam.caught_count}</strong>{" "}
+                    drivers
+                  </>
+                ) : (
+                  "No confirmed tickets yet"
+                )}
+              </span>
+            </div>
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                setVerifyingCaughtId(cam.id);
+              }}
+              className="text-xs font-semibold bg-[#1C212B] hover:bg-slate-700 text-slate-200 px-3.5 py-2 rounded-xl transition-colors border border-slate-700 shadow-sm whitespace-nowrap"
+            >
+              I got caught here
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  };
+
   return (
-    <div className="flex w-full h-screen overflow-hidden bg-slate-950 font-sans text-slate-200">
-      {/* Mobile Menu Toggle */}
+    <div className="flex w-full h-[100dvh] overflow-hidden bg-slate-950 font-sans text-slate-200 relative">
       <button
         onClick={() => setIsSidebarOpen(!isSidebarOpen)}
         className="md:hidden absolute top-6 left-6 z-40 bg-slate-900/90 backdrop-blur-xl p-3.5 rounded-2xl shadow-sm border border-slate-700/60 text-slate-300 hover:bg-slate-800 transition-all active:scale-95"
@@ -433,9 +577,8 @@ export default function SpeedCameraMap() {
         )}
       </button>
 
-      {/* Sidebar - Ranked Cameras & Ad Space */}
       <div
-        className={`absolute md:relative z-30 h-full w-80 bg-slate-900/80 backdrop-blur-2xl shadow-[4px_0_40px_rgba(0,0,0,0.5)] border-r border-slate-800/80 flex flex-col transform transition-transform duration-500 ease-out ${
+        className={`absolute inset-y-0 left-0 md:relative z-30 flex flex-col w-[340px] bg-slate-900/80 backdrop-blur-2xl shadow-[4px_0_40px_rgba(0,0,0,0.5)] border-r border-slate-800/80 transform transition-transform duration-500 ease-out ${
           isSidebarOpen ? "translate-x-0" : "-translate-x-full md:translate-x-0"
         }`}
       >
@@ -466,25 +609,25 @@ export default function SpeedCameraMap() {
                     isTop
                       ? "border-amber-500/30 bg-gradient-to-br from-amber-500/10 to-orange-500/5"
                       : "border-slate-700/50 bg-slate-800/40"
-                  } shadow-sm hover:shadow-md hover:border-blue-500/40 hover:bg-slate-800/60 transition-all duration-300 cursor-pointer`}
+                  } shadow-sm hover:shadow-md hover:border-blue-500/40 hover:bg-slate-800/60 transition-all duration-300 cursor-pointer flex flex-col`}
                   onClick={() => {
                     setSelectedCamera(cam);
                     setEditingCamera(null);
                     if (window.innerWidth < 768) setIsSidebarOpen(false);
                   }}
                 >
-                  <div className="flex justify-between items-start mb-3">
-                    <div className="flex-1 min-w-0 pr-3">
+                  <div className="flex justify-between items-start gap-3">
+                    <div className="flex-1 min-w-0">
                       <h3 className="font-semibold text-white leading-snug flex items-start gap-2">
                         {isTop && (
                           <Flame className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
                         )}
                         <div className="flex flex-col min-w-0">
-                          <span className="truncate" title={mainName}>
+                          <span className="break-words text-[15px]">
                             {mainName}
                           </span>
                           {plusCode && (
-                            <span className="text-[10px] font-mono text-slate-500 mt-0.5 tracking-wider uppercase truncate">
+                            <span className="text-[11px] font-mono text-slate-400 mt-1 tracking-wider uppercase">
                               {plusCode}
                             </span>
                           )}
@@ -492,10 +635,10 @@ export default function SpeedCameraMap() {
                       </h3>
                     </div>
                     <span
-                      className={`shrink-0 text-xs font-bold px-2.5 py-1.5 rounded-lg border flex items-center gap-1 ${
+                      className={`shrink-0 text-[11px] font-bold px-3 py-1.5 rounded-xl border flex items-center gap-1 ${
                         isTop
-                          ? "bg-amber-500/20 text-amber-400 border-amber-500/30"
-                          : "bg-slate-700/50 text-slate-300 border-slate-600/50"
+                          ? "bg-amber-500/10 text-amber-400 border-amber-500/20"
+                          : "bg-slate-800 text-slate-200 border-slate-700/80"
                       }`}
                     >
                       {cam.speed_limit ? (
@@ -505,23 +648,16 @@ export default function SpeedCameraMap() {
                       )}
                     </span>
                   </div>
-                  <div className="flex justify-between items-center text-[11px] font-semibold text-slate-500 mt-4 uppercase tracking-wider">
-                    {/*<span className="flex items-center gap-1.5">
-                      <Info className="w-3.5 h-3.5 text-slate-600" />
-                      {new Date(cam.created_at).toLocaleDateString()}
-                    </span>*/}
-                    {/*<span className="bg-slate-900/60 px-2.5 py-1.5 rounded-lg text-slate-400 flex items-center gap-1.5 shadow-sm border border-slate-700/50">
-                      <Users className="w-3.5 h-3.5" />
-                      {cam.report_count}
-                    </span>*/}
-                  </div>
+
+                  {/* Removed date and report count section per user request */}
+
+                  {renderCaughtUI(cam)}
                 </div>
               );
             })
           )}
         </div>
 
-        {/* --- AD BANNER (Alex Auto Care) --- */}
         <div className="p-4 border-t border-slate-800/80 bg-slate-900/90 shrink-0">
           <a
             href="https://www.alexautocare.com/"
@@ -534,7 +670,6 @@ export default function SpeedCameraMap() {
             }
             className="block group relative overflow-hidden rounded-2xl bg-gradient-to-br from-slate-800/80 to-slate-900 border border-slate-700/60 p-4 hover:border-blue-500/40 transition-all duration-300"
           >
-            {/* Background Icon Accent */}
             <div className="absolute -bottom-4 -right-4 p-2 opacity-10 group-hover:opacity-20 group-hover:scale-110 transition-all duration-500">
               <Car className="w-24 h-24 text-blue-400" />
             </div>
@@ -567,7 +702,6 @@ export default function SpeedCameraMap() {
         </div>
       </div>
 
-      {/* Main Map Area */}
       <div className="flex-1 relative h-full">
         {isMapIdle && (
           <div className="absolute top-8 left-1/2 -translate-x-1/2 z-20 pointer-events-none transition-all duration-500 animate-in fade-in slide-in-from-top-6">
@@ -593,7 +727,6 @@ export default function SpeedCameraMap() {
             <TrafficLayerFeature />
             <MapCameraHandler selectedCamera={selectedCamera} />
 
-            {/* Existing Cameras */}
             {cameras.map((camera) => (
               <AdvancedMarker
                 key={camera.id}
@@ -626,7 +759,6 @@ export default function SpeedCameraMap() {
               </AdvancedMarker>
             ))}
 
-            {/* New Marker Placement */}
             {newMarker && (
               <AdvancedMarker position={newMarker}>
                 <div className="relative flex flex-col items-center justify-center animate-bounce">
@@ -642,24 +774,26 @@ export default function SpeedCameraMap() {
               </AdvancedMarker>
             )}
 
-            {/* Info Window */}
             {selectedCamera && !editingCamera && (
               <InfoWindow
                 position={{ lat: selectedCamera.lat, lng: selectedCamera.lng }}
-                onCloseClick={() => setSelectedCamera(null)}
+                onCloseClick={() => {
+                  setSelectedCamera(null);
+                  setVerifyingCaughtId(null);
+                }}
               >
-                <div className="p-4 text-slate-200 min-w-[240px] font-sans !bg-slate-900 !rounded-xl">
+                <div className="text-slate-200 min-w-[280px] max-w-[320px] font-sans">
                   {(() => {
                     const { mainName, plusCode } = formatRoadName(
                       selectedCamera.road_name,
                     );
                     return (
                       <>
-                        <h3 className="font-bold text-lg leading-tight text-white">
+                        <h3 className="font-bold text-lg leading-tight text-white mb-1">
                           {mainName}
                         </h3>
                         {plusCode && (
-                          <p className="text-[11px] font-mono text-slate-400 mb-4 mt-1 tracking-widest">
+                          <p className="text-[11px] font-mono text-slate-400 mb-4 tracking-widest uppercase">
                             {plusCode}
                           </p>
                         )}
@@ -668,25 +802,26 @@ export default function SpeedCameraMap() {
                     );
                   })()}
 
-                  <div className="flex gap-3 mb-2">
-                    <span className="bg-blue-500/10 text-blue-400 text-xs font-semibold px-3 py-2 rounded-xl border border-blue-500/20 flex items-center gap-2">
+                  <div className="flex gap-3 mb-4">
+                    <span className="bg-blue-500/10 text-blue-400 text-xs font-semibold px-3 py-2 rounded-xl border border-blue-500/20 flex items-center gap-1.5">
                       <Zap className="w-3.5 h-3.5" />
                       {selectedCamera.speed_limit
                         ? `${selectedCamera.speed_limit} km/h`
                         : "Unknown"}
                     </span>
-                    {/*<span className="bg-slate-800 text-slate-300 text-xs font-semibold px-3 py-2 rounded-xl border border-slate-700 flex items-center gap-2">
+                    <span className="bg-slate-800 text-slate-300 text-xs font-semibold px-3 py-2 rounded-xl border border-slate-700 flex items-center gap-1.5">
                       <Users className="w-3.5 h-3.5" />
                       {selectedCamera.report_count} Reports
-                    </span>*/}
+                    </span>
                   </div>
+
+                  {renderCaughtUI(selectedCamera)}
                 </div>
               </InfoWindow>
             )}
           </Map>
         </APIProvider>
 
-        {/* Repositioned "My Location" Button */}
         <button
           onClick={handleCurrentLocation}
           disabled={isFetchingLocation}
@@ -700,7 +835,6 @@ export default function SpeedCameraMap() {
           )}
         </button>
 
-        {/* MODAL 2: New Camera & Proximity Warning */}
         {newMarker && (
           <div className="absolute bottom-8 left-1/2 -translate-x-1/2 bg-slate-900/95 backdrop-blur-3xl p-7 rounded-[2rem] shadow-[0_20px_60px_-15px_rgba(0,0,0,0.5)] border border-slate-700/50 z-20 w-[92%] max-w-sm transition-all animate-in slide-in-from-bottom-12 duration-500">
             <div className="flex justify-between items-start mb-2">
@@ -732,10 +866,10 @@ export default function SpeedCameraMap() {
                           {mainName}
                         </strong>
                         {plusCode && (
-                          <span className="text-[10px] font-mono text-amber-500/70 ml-1">
+                          <span className="text-[10px] font-mono text-amber-500/70 ml-1 block">
                             {plusCode}
                           </span>
-                        )}{" "}
+                        )}
                         is already reported just{" "}
                         <strong className="font-bold text-amber-400">
                           {nearbyDistance}m
@@ -779,7 +913,7 @@ export default function SpeedCameraMap() {
                           {mainName}
                         </span>
                         {plusCode && (
-                          <span className="text-[10px] font-mono text-slate-400 mt-0.5">
+                          <span className="text-[10px] font-mono text-slate-400 mt-1">
                             {plusCode}
                           </span>
                         )}

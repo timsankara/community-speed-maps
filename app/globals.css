@@ -24,3 +24,39 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+
+/* Add to app/globals.css */
+
+/* Darken the main InfoWindow bubble and remove default padding */
+.gm-style-iw.gm-style-iw-c {
+  background-color: #0f172a !important; /* Tailwind slate-900 */
+  border: 1px solid #1e293b !important; /* Tailwind slate-800 */
+  border-radius: 1.25rem !important;
+  padding: 0 !important;
+  box-shadow: 0 20px 25px -5px rgb(0 0 0 / 0.5), 0 8px 10px -6px rgb(0 0 0 / 0.5) !important;
+}
+
+/* Darken the bottom pointer arrow */
+.gm-style-iw-tc::after {
+  background: #0f172a !important;
+  border-right: 1px solid #1e293b !important;
+  border-bottom: 1px solid #1e293b !important;
+}
+
+/* Fix inner padding and remove ugly scrollbars */
+.gm-style-iw-d {
+  overflow: visible !important;
+  padding: 1.25rem !important;
+}
+
+/* Make the default close 'X' button visible on dark backgrounds */
+.gm-style-iw-chr .gm-ui-hover-effect {
+  filter: invert(1) !important;
+  opacity: 0.6 !important;
+  margin-right: 4px !important;
+  margin-top: 4px !important;
+}
+.gm-style-iw-chr .gm-ui-hover-effect:hover {
+  opacity: 1 !important;
+}

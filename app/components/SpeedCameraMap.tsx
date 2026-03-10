@@ -21,6 +21,7 @@ import {
   HelpCircle,
   Info,
 } from "lucide-react";
+import posthog from "posthog-js";
 
 // --- Types ---
 type SpeedCamera = {
@@ -339,6 +340,13 @@ export default function SpeedCameraMap() {
 
     const { error } = await supabase.from("speed_cameras").insert([cameraData]);
     if (!error) {
+      if (posthog) {
+        posthog.capture("camera_reported", {
+          road_name: newMarker.road_name,
+          has_speed_limit: !!speedLimit,
+          speed_limit_value: speedLimit || "none",
+        });
+      }
       setSpeedLimit("");
       setNewMarker(null);
       fetchCameras();
@@ -362,6 +370,12 @@ export default function SpeedCameraMap() {
       .update(updates)
       .eq("id", editingCamera.id);
     if (!error) {
+      if (posthog) {
+        posthog.capture("camera_edited", {
+          camera_id: editingCamera.id,
+          new_speed_limit: editSpeedLimit,
+        });
+      }
       setEditingCamera(null);
       setEditSpeedLimit("");
       fetchCameras();
@@ -385,6 +399,13 @@ export default function SpeedCameraMap() {
       .eq("id", nearbyCamera.id);
 
     if (!error) {
+      if (posthog) {
+        posthog.capture("camera_confirmed", {
+          camera_id: nearbyCamera.id,
+          road_name: nearbyCamera.road_name,
+          added_speed: !!confirmSpeedLimit,
+        });
+      }
       setNewMarker(null);
       setNearbyCamera(null);
       setConfirmSpeedLimit("");
@@ -533,6 +554,12 @@ export default function SpeedCameraMap() {
                   setSelectedCamera(camera);
                   setEditingCamera(null);
                   setNewMarker(null);
+                  if (posthog) {
+                    posthog.capture("camera_viewed", {
+                      camera_id: camera.id,
+                      road_name: camera.road_name,
+                    });
+                  }
                 }}
               >
                 <div className="relative flex flex-col items-center justify-center cursor-pointer group">
@@ -605,6 +632,17 @@ export default function SpeedCameraMap() {
                       {selectedCamera.report_count} Reports
                     </span>
                   </div>
+
+                  {/* <button
+                    onClick={() => {
+                      setEditingCamera(selectedCamera);
+                      setSelectedCamera(null);
+                    }}
+                    className="w-full mt-4 bg-white text-slate-900 px-4 py-3 rounded-xl text-sm font-semibold hover:bg-slate-200 transition-all shadow-md active:scale-[0.98] flex justify-center items-center gap-2"
+                  >
+                    Update Speed Limit
+                  </button>
+                  */}
                 </div>
               </InfoWindow>
             )}
@@ -624,6 +662,60 @@ export default function SpeedCameraMap() {
             <LocateFixed className="w-5 h-5 text-slate-300 group-hover:text-blue-400 transition-colors" />
           )}
         </button>
+
+        {/* MODAL 1: Dedicated Editing Modal (COMMENTED OUT FOR NOW) */}
+        {/* {editingCamera && (
+          <div className="absolute bottom-8 left-1/2 -translate-x-1/2 bg-slate-900/95 backdrop-blur-3xl p-7 rounded-[2rem] shadow-[0_20px_60px_-15px_rgba(0,0,0,0.5)] border border-slate-700/50 z-20 w-[92%] max-w-sm transition-all animate-in slide-in-from-bottom-12 duration-500">
+            <div className="flex justify-between items-start mb-3">
+              <h3 className="text-xl font-bold text-slate-900 tracking-tight">
+                Update Camera
+              </h3>
+              <button
+                onClick={() => setEditingCamera(null)}
+                className="text-slate-400 hover:text-slate-900 bg-slate-50 hover:bg-slate-100 rounded-full p-2 transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <p className="text-sm text-slate-500 font-medium mb-6">
+              {editingCamera.road_name}
+            </p>
+
+            <div className="space-y-5">
+              <div>
+                <label className="text-[11px] font-bold text-slate-400 uppercase tracking-widest mb-2 block">
+                  New Speed Limit
+                </label>
+                <div className="relative">
+                  <input
+                    type="number"
+                    placeholder={
+                      editingCamera.speed_limit
+                        ? `Currently ${editingCamera.speed_limit}`
+                        : "Enter new limit..."
+                    }
+                    className="w-full bg-slate-50/50 border border-slate-200/60 rounded-2xl p-4 text-slate-900 font-semibold focus:bg-white focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500/30 outline-none transition-all placeholder:font-medium placeholder:text-slate-400"
+                    value={editSpeedLimit}
+                    onChange={(e) => setEditSpeedLimit(e.target.value)}
+                  />
+                  <span className="absolute right-5 top-1/2 -translate-y-1/2 text-slate-400 font-medium text-sm">
+                    km/h
+                  </span>
+                </div>
+              </div>
+
+              <button
+                onClick={handleEditCamera}
+                disabled={isSubmitting}
+                className="w-full bg-blue-600 text-white font-semibold py-4 rounded-2xl shadow-lg shadow-blue-500/20 hover:shadow-xl hover:shadow-blue-500/30 hover:bg-blue-700 active:scale-[0.98] transition-all disabled:opacity-70"
+              >
+                {isSubmitting ? "Updating..." : "Confirm Update"}
+              </button>
+            </div>
+          </div>
+        )}
+        */}
 
         {/* MODAL 2: New Camera & Proximity Warning */}
         {newMarker && (
@@ -670,6 +762,29 @@ export default function SpeedCameraMap() {
                     );
                   })()}
                 </div>
+
+                {/* <div className="mb-6">
+                  <label className="text-[11px] font-bold text-slate-500 uppercase tracking-widest mb-2 block">
+                    Update Speed? (Optional)
+                  </label>
+                  <div className="relative">
+                    <input
+                      type="number"
+                      placeholder={
+                        nearbyCamera.speed_limit
+                          ? `Currently ${nearbyCamera.speed_limit}`
+                          : "e.g. 50"
+                      }
+                      className="w-full bg-slate-800 border border-slate-700 rounded-2xl p-4 text-white font-semibold focus:bg-slate-700 focus:ring-4 focus:ring-amber-500/20 focus:border-amber-500/50 outline-none transition-all placeholder:font-medium placeholder:text-slate-500"
+                      value={confirmSpeedLimit}
+                      onChange={(e) => setConfirmSpeedLimit(e.target.value)}
+                    />
+                    <span className="absolute right-5 top-1/2 -translate-y-1/2 text-slate-500 font-medium text-sm">
+                      km/h
+                    </span>
+                  </div>
+                </div>
+                */}
 
                 <div className="space-y-3 mt-4">
                   <button
